@@ -1,6 +1,6 @@
 /* example of single producer and single consumer
 
-   This uses a ring-buffer and no other means of mutual exclusion.
+   This uses a ring-g_buffer and no other means of mutual exclusion.
    It works because the shared variables "in" and "out" each
    have only a single writer.  It is an excellent technique for
    those situations where it is adequate.
@@ -33,7 +33,7 @@ pthread_t consumer_id[N_CONSUMERS];
 pthread_t producer;
 
 void * consumer_body (void *arg) {
-/* create one unit of data and put it in the buffer
+/* create one unit of data and put it in the g_buffer
    Assumes arg points to an element of the array id_number,
    identifying the current thread. */
   int tmp;
@@ -41,9 +41,9 @@ void * consumer_body (void *arg) {
 
   fprintf(stderr, "consumer thread starts\n"); 
   for (;;) {
-     /* wait for buffer to fill */
+     /* wait for g_buffer to fill */
      while (out == in);
-     /* take one unit of data from the buffer */
+     /* take one unit of data from the g_buffer */
      tmp = b[out];
      out = (out + 1) % BUF_SIZE;     
      /* copy the data to stdout */
@@ -54,13 +54,13 @@ void * consumer_body (void *arg) {
 }
 
 void * producer_body (void * arg) {
-/* takes one unit of data from the buffer */
+/* takes one unit of data from the g_buffer */
    int i;
    fprintf(stderr, "producer thread starts\n"); 
    for (i = 0; i < MAXINT; i++) {
-     /* wait for space in buffer */
+     /* wait for space in g_buffer */
      while (((in + 1) % BUF_SIZE) == out);
-     /* put value i into the buffer */
+     /* put value i into the g_buffer */
      b[in] = i;
      in = (in + 1) % BUF_SIZE;     
   }
