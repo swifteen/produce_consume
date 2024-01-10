@@ -1,7 +1,7 @@
 # prodcons/Makefile
 LIBS= -lpthread
 PROGRAMS= prodcons0 prodcons1 prodcons2 prodcons3 spmc spmc2 ordering
-CCOPTS= -Wall -pedantic -ansi -g  
+CCOPTS= -Wall -pedantic -ansi -g   -ggdb -fsanitize=address -fno-omit-frame-pointer -static-libstdc++ -static-libasan
 all: $(PROGRAMS)
 prodcons0: prodcons0.c Makefile
 	gcc $(CCOPTS) -o example prodcons0.c $(LIBS)
