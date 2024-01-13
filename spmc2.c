@@ -15,9 +15,9 @@
 #define DUMP_GREEN printf("\033[0;32;32m")
 #define DUMP_NONE printf("\033[m")
 #if 1
-#define DEBUG_PN(msg, args...)        do{printf("[%s][%d]:\t ", __FUNCTION__ , __LINE__ );printf(msg, ##args);}while(0)
-#define DEBUG_PD(msg, args...)        do{DUMP_GREEN; printf("[%s][%d]:\t ", __FUNCTION__ , __LINE__ );printf(msg, ##args);DUMP_NONE;}while(0)
-#define DEBUG_PW(msg, args...)        do{DUMP_RED; printf("[%s][%d]:\t ", __FUNCTION__ , __LINE__ );printf(msg, ##args);DUMP_NONE;}while(0)
+#define DEBUG_PN(msg, args...)        do{printf("[%s][%d]:\t\t ", __FUNCTION__ , __LINE__ );printf(msg, ##args);}while(0)
+#define DEBUG_PD(msg, args...)        do{DUMP_GREEN; printf("[%s][%d]:\t\t ", __FUNCTION__ , __LINE__ );printf(msg, ##args);DUMP_NONE;}while(0)
+#define DEBUG_PW(msg, args...)        do{DUMP_RED; printf("[%s][%d]:\t\t ", __FUNCTION__ , __LINE__ );printf(msg, ##args);DUMP_NONE;}while(0)
 #else
 #define DEBUG_PN(msg, args...)        
 #define DEBUG_PD(msg, args...)        
@@ -26,8 +26,8 @@
 
 #define BUFFER_SIZE (1024)
 #define MAGIC_NUMBER (0xAACC9527)
-#define CONSUMER_NUM (3)
-#define DEBUG_MAX_SEQ_NO (100)
+#define CONSUMER_NUM (2)
+#define DEBUG_MAX_SEQ_NO (10)
 
 static  FILE* g_simulate_fp = NULL;//真实读取到的模拟数据
 static int g_run_flag = 1;//线程运行标识
@@ -51,157 +51,131 @@ typedef struct {
     MyData *buffer;  // 缓冲区数据
     int size;     // 缓冲区大小
     int write_idx;       // 生产者写入位置
-    int read_idx;      // 消费者读取位置
+    int read_idx[CONSUMER_NUM];      // 消费者读取位置
     pthread_mutex_t lock;  // 互斥锁
     pthread_cond_t full;   // 缓冲区满条件变量
     pthread_cond_t empty;  // 缓冲区空条件变量
     
-    int *buf_used_count;  // 缓冲区每个MyData数据被使用的记数
+    int *buf_used_count;  // 缓冲区每个MyData数据被使用的记数，用于优化减少判断，空间换时间
 } BoundedBuffer;
 
 BoundedBuffer g_buffer;
 
-int avilable_read_len(int last_read_idx)
+//从3个消费者中找到最小的可写长度
+int avilable_write_len()
 {
-    if(last_read_idx < g_buffer.write_idx)
-    {
-        return g_buffer.write_idx - last_read_idx - 1;
-    }
-    return g_buffer.size - last_read_idx + g_buffer.write_idx - 1;
+	int min_avilable_write_len = BUFFER_SIZE;
+	for (int i = 0; i < CONSUMER_NUM; i++)
+	{
+		int len = 0;
+		if(g_buffer.read_idx[i] > g_buffer.write_idx)
+		{
+			len = g_buffer.read_idx[i] - g_buffer.write_idx;
+		}
+		else
+		{
+			len = g_buffer.size - g_buffer.write_idx  + g_buffer.read_idx[i];
+		}
+		//取最小的可写入长度，它代表了最慢的那个消费者
+		if(len < min_avilable_write_len)
+		{
+			min_avilable_write_len = len;
+		}
+	}
+	return min_avilable_write_len;
 }
 
-void get_write_idx(int* write_idx)
+/*
+可写的情况，需要处理第一次启动时，读写指针相等的情况
+1、写指针对应的使用计数等于0，代表正在被占用，加快判断
+2、写指针不能超过所有的读指针
+*/
+bool avilable_write()
 {
-    pthread_mutex_lock(&g_buffer.lock);
-
-    if(g_buffer.read_idx != g_buffer.write_idx)
-    {
-        // 等待缓冲区非满
-        while ((avilable_read_len(g_buffer.read_idx) == g_buffer.size - 1)
-               || (g_buffer.buf_used_count[g_buffer.write_idx] > 0)) {
-            pthread_cond_wait(&g_buffer.full, &g_buffer.lock);
-        }
-    }
-    *write_idx = g_buffer.write_idx;
-    pthread_mutex_unlock(&g_buffer.lock);
+	if((g_buffer.buf_used_count[g_buffer.write_idx] > 0)
+		|| (avilable_write_len() <= 0))
+	{
+		return false;
+	}
+	return true;
 }
 
+//阻塞等待，直到写指针位置可写入
 void get_write_pos(MyData** data,int* write_idx)
 {
     pthread_mutex_lock(&g_buffer.lock);
-
-    if(g_buffer.read_idx != g_buffer.write_idx)
-    {
-        // 等待缓冲区非满
-        while ((avilable_read_len(g_buffer.read_idx) == g_buffer.size - 1)
-               || (g_buffer.buf_used_count[g_buffer.write_idx] > 0)) {
-            pthread_cond_wait(&g_buffer.full, &g_buffer.lock);
-        }
+    // 等待缓冲区非满
+    while (!avilable_write()) {
+        pthread_cond_wait(&g_buffer.full, &g_buffer.lock);
     }
     *data = &g_buffer.buffer[g_buffer.write_idx];
     *write_idx = g_buffer.write_idx;
-    DEBUG_PN("write_idx[%d],read_idx[%d],count[%d]\n",
-             g_buffer.write_idx,g_buffer.read_idx,avilable_read_len(g_buffer.read_idx));
     pthread_mutex_unlock(&g_buffer.lock);
 }
 
-void write_data()
+//将写指针前移
+void write_one_data()
 {
     pthread_mutex_lock(&g_buffer.lock);
     g_buffer.write_idx = (g_buffer.write_idx + 1) % g_buffer.size;
-    DEBUG_PN("write_idx[%d],read_idx[%d],count[%d]\n",
-             g_buffer.write_idx,g_buffer.read_idx,avilable_read_len(g_buffer.read_idx));
-    // 唤醒一个消费者
-    //pthread_cond_signal(&g_buffer.empty);
-    pthread_cond_broadcast(&g_buffer.empty);
+    pthread_cond_broadcast(&g_buffer.empty);// 唤醒所有消费者
     pthread_mutex_unlock(&g_buffer.lock);
 }
 
-int write_data_block(int* data,int data_count)
+//获取可读取的长度
+int avilable_read_len(int read_idx)
 {
-    return 0;
+    if(read_idx < g_buffer.write_idx)
+    {
+        return g_buffer.write_idx - read_idx - 1;
+    }
+    return g_buffer.size + g_buffer.write_idx  - read_idx - 1;
 }
 
-int read_first_data(int consumerId,MyData** data,int* read_idx)
+/*
+读指针此时不更新，让写指针不要越过读指针，读取完成后，再将读指针前移
+也就是g_buffer.read_idx始终指向下一个即将要读的位置
+判断是否可读的条件是,读指针与写指针不相同，且可读取的长度不为0，也就是写指针要超前读指针
+*/
+int read_data(int consumerId,bool bFirst,MyData** data)
 {
     pthread_mutex_lock(&g_buffer.lock);
-
+    assert(0 <= g_buffer.read_idx[consumerId] && g_buffer.read_idx[consumerId] < g_buffer.size);
     // 等待缓冲区非空
-    while (g_buffer.read_idx == g_buffer.write_idx) {
+    while (avilable_read_len(g_buffer.read_idx[consumerId]) <= 0) {
         pthread_cond_wait(&g_buffer.empty, &g_buffer.lock);
     }
-    DEBUG_PD("consumerId[%d],write_idx[%d],read_idx[%d],count[%d],buf_used_count[%d]=[%d]\n",
-             consumerId,
-             g_buffer.write_idx,
-             g_buffer.read_idx,
-             avilable_read_len(g_buffer.read_idx),
-             g_buffer.read_idx,g_buffer.buf_used_count[g_buffer.read_idx]);
-    if(0 == g_buffer.write_idx)
-    {
-        g_buffer.read_idx = g_buffer.size - 1;
-    }
-    else
-    {
-        g_buffer.read_idx = g_buffer.write_idx - 1;
-    }
-    g_buffer.buf_used_count[g_buffer.read_idx]++;//将使用计数加加
-    assert(g_buffer.buf_used_count[g_buffer.read_idx] <= CONSUMER_NUM);
-    *data = &(g_buffer.buffer[g_buffer.read_idx]);
-    *read_idx = g_buffer.read_idx;
-    DEBUG_PD("consumerId[%d],write_idx[%d],read_idx[%d],count[%d],buf_used_count[%d]=[%d]\n",
-             consumerId,
-             g_buffer.write_idx,
-             g_buffer.read_idx,
-             avilable_read_len(g_buffer.read_idx),
-             *read_idx,g_buffer.buf_used_count[*read_idx]);
+	int read_idx = 0;
+	if(!bFirst)//如果不是第一次读取数据，则此次直接读取g_buffer.read_idx位置的数据，因为g_buffer.read_idx指针下一次读取的位置
+	{
+		read_idx = g_buffer.read_idx[consumerId];
+	}
+	else//如果第一次读取数据，则将读取指针指向写指针的前一个位置，上面的可读长度判断已经保证此时写指针一定超前读指针了
+	{
+		if(0 == g_buffer.write_idx)
+		{
+			read_idx = g_buffer.size - 1;
+		}
+		else
+		{
+			read_idx = g_buffer.write_idx - 1;
+		}
+	}
+    g_buffer.buf_used_count[read_idx]++;//将使用计数加加
+    assert(g_buffer.buf_used_count[read_idx] <= CONSUMER_NUM);
+    *data = &(g_buffer.buffer[read_idx]);
     pthread_mutex_unlock(&g_buffer.lock);
     return 0;
 }
 
-int read_data(int consumerId,MyData** data,int last_read_idx,int* read_idx)
+//将读指针前移，并将使用计数减减，再唤醒生产者
+void release_read_data(int consumerId)
 {
-    assert(0 <= last_read_idx && last_read_idx < g_buffer.size);
     pthread_mutex_lock(&g_buffer.lock);
-
-    // 等待缓冲区非空
-    while ((g_buffer.read_idx == g_buffer.write_idx)
-           || (0 == avilable_read_len(last_read_idx))){
-        pthread_cond_wait(&g_buffer.empty, &g_buffer.lock);
-    }
-    if(last_read_idx == g_buffer.size - 1)
-    {
-        *read_idx = 0;
-    }
-    else
-    {
-        *read_idx = last_read_idx + 1;
-    }
-    g_buffer.buf_used_count[*read_idx]++;//将使用计数加加
-    *data = &(g_buffer.buffer[*read_idx]);
-    DEBUG_PD("consumerId[%d],write_idx[%d],read_idx[%d],count[%d],buf_used_count[%d]=[%d],last_read_idx[%d],avilable_read_len[%d]\n",
-             consumerId,g_buffer.write_idx,g_buffer.read_idx,avilable_read_len(g_buffer.read_idx),*read_idx,
-             g_buffer.buf_used_count[*read_idx],last_read_idx,avilable_read_len(last_read_idx));
-    pthread_mutex_unlock(&g_buffer.lock);
-    return 0;
-}
-
-void release_read_data(int consumerId,int read_idx)
-{
-    assert(g_buffer.buf_used_count[read_idx] > 0);
-    pthread_mutex_lock(&g_buffer.lock);
-	DEBUG_PW("consumerId[%d],seqNo[%d],write_idx[%d],read_idx[%d],count[%d],buf_used_count[%d] = [%d]\n",
-			 consumerId,g_buffer.buffer[read_idx].seqNo,g_buffer.write_idx,g_buffer.read_idx,avilable_read_len(g_buffer.read_idx),
-			 g_buffer.read_idx,g_buffer.buf_used_count[g_buffer.read_idx]);
-    g_buffer.buf_used_count[read_idx]--;
-    if(0 == g_buffer.buf_used_count[read_idx])
-    {
-        DEBUG_PW("consumerId[%d],seqNo[%d],write_idx[%d],read_idx[%d],count[%d],buf_used_count[%d]\n",
-                 consumerId,g_buffer.buffer[g_buffer.read_idx].seqNo,g_buffer.write_idx,g_buffer.read_idx,
-                 avilable_read_len(g_buffer.read_idx),g_buffer.buf_used_count[read_idx]);
-        g_buffer.read_idx = (g_buffer.read_idx + 1) % g_buffer.size;
-    }
-    // 唤醒生产者
-    pthread_cond_signal(&g_buffer.full);
+    assert(g_buffer.buf_used_count[g_buffer.read_idx[consumerId]] > 0);
+    g_buffer.buf_used_count[g_buffer.read_idx[consumerId]]--;
+	g_buffer.read_idx[consumerId] = (g_buffer.read_idx[consumerId] + 1) % g_buffer.size;
+    pthread_cond_signal(&g_buffer.full); // 唤醒生产者
     pthread_mutex_unlock(&g_buffer.lock);
 }
 
@@ -223,7 +197,7 @@ static void *producer(void *arg) {
         return NULL;
     }
 #if 1
-	//等待消费者全部消费完成
+	//等待消费者线程全部启动后，再开始生产
 	for (int i = 0; i < CONSUMER_NUM; i++) {
 		DEBUG_PN("sem_wait[%d]1\n",i);
 		sem_wait(&g_consumerSema[i]);
@@ -242,11 +216,7 @@ static void *producer(void *arg) {
         {
             DEBUG_PN("fwrite write nread len error[%d][%d]\n", ret, errno);
         }
-        write_data();
-        if(g_seqNo > DEBUG_MAX_SEQ_NO)
-        {
-            g_run_flag = 0;
-        }
+        write_one_data();
     }
     if (g_simulate_fp)
     {
@@ -258,7 +228,7 @@ static void *producer(void *arg) {
 
 static void *consumer(void *arg) {
     int consumerId = *((int*)arg);
-    int last_read_idx = -1;
+	bool bFirst = true;
     char consumer_file_path[128];
     snprintf(consumer_file_path,sizeof(consumer_file_path),"%s/consumer_%d.bin",g_output_dir,consumerId);
     FILE* fp = NULL;
@@ -270,48 +240,42 @@ static void *consumer(void *arg) {
         return NULL;
     }
 #if 1
-	//让生产者退出
-		sem_post(&g_consumerSema[consumerId]);
+	//让生产者开始生产
+	sem_post(&g_consumerSema[consumerId]);
 #endif
 	DEBUG_PN("start consumer[%d] = [%s]\n",consumerId, consumer_file_path);
     int ret = 0;
     MyData* pData = NULL;
     while (g_run_flag) {
-        if(last_read_idx > 0)
+		read_data(consumerId,bFirst,&pData);
+        if(!bFirst)
         {
-            int cur_read_idx = -1;
-            if(read_data(consumerId,&pData,last_read_idx,&cur_read_idx) == 0)
-            {
-                last_read_idx = cur_read_idx;
-            }
-//            if(g_lastSeqNo[consumerId] + 1 != pData->seqNo)
-//            {
-//                DEBUG_PW("g_lastSeqNo[%d] =[%d]  != seqNo[%d],write_idx[%d],read_idx[%d],count[%d],buf_used_count[%d] = [%d]\n",
-//                         consumerId,g_lastSeqNo[consumerId],pData->seqNo,g_buffer.write_idx,g_buffer.read_idx,avilable_read_len(g_buffer.read_idx),g_buffer.read_idx,g_buffer.buf_used_count[g_buffer.read_idx]);
-//                assert(g_lastSeqNo[consumerId] + 1 == pData->seqNo);
-//            }
-            g_lastSeqNo[consumerId] = pData->seqNo;
+            assert(g_lastSeqNo[consumerId] + 1 == pData->seqNo);
         }
-        else
-        {
-            read_first_data(consumerId,&pData,&last_read_idx);
-            g_lastSeqNo[consumerId] = pData->seqNo;
-            assert(last_read_idx >= 0);
-        }
+		else
+		{
+			bFirst = false;
+		}
+        g_lastSeqNo[consumerId] = pData->seqNo;
         ret = fwrite(pData, sizeof(MyData), 1, fp);
 
         if (ret < 0)
         {
-            printf("fwrite write nread len error[%d][%d]\n", ret, errno);
+            DEBUG_PD("fwrite write nread len error[%d][%d]\n", ret, errno);
             break;
         }
-        release_read_data(consumerId,last_read_idx);
+        release_read_data(consumerId);
     }
     fclose(fp);
     return NULL;
 }
 
 int main(int argc, char** argv) {
+	if(argc != 2)
+	{
+		printf("usage: %s output_dir\n",argv[0]);
+		return -1;
+	}
     snprintf(g_output_dir, sizeof(g_output_dir), "%s",argv[1]);
     // 检查目录是否存在
     if (access(g_output_dir, F_OK) == -1) {
@@ -327,11 +291,12 @@ int main(int argc, char** argv) {
 
     // 初始化缓冲区
     g_buffer.buffer = (MyData *)malloc(sizeof(MyData) * BUFFER_SIZE);
+    memset(g_buffer.buffer,0,sizeof(MyData) * BUFFER_SIZE);
     g_buffer.buf_used_count  = (int *)malloc(sizeof(int) * BUFFER_SIZE);
     memset(g_buffer.buf_used_count,0,sizeof(int) * BUFFER_SIZE);
     g_buffer.size = BUFFER_SIZE;
     g_buffer.write_idx = 0;
-    g_buffer.read_idx = 0;
+    memset(g_buffer.read_idx,0,sizeof(g_buffer.read_idx));
     pthread_mutex_init(&g_buffer.lock, NULL);
     pthread_cond_init(&g_buffer.full, NULL);
     pthread_cond_init(&g_buffer.empty, NULL);

@@ -3,6 +3,7 @@ LIBS= -lpthread
 PROGRAMS= prodcons0 prodcons1 prodcons2 prodcons3 spmc spmc2 ordering
 CCOPTS= -Wall -pedantic -ansi -g   -ggdb  -fno-omit-frame-pointer 
 #CCOPTS +=-fsanitize=address -static-libasan  -static-libstdc++   -fsanitize=thread
+#arm-linux-gnueabihf-g++ -Wall -pedantic -ansi -g   -ggdb  -fno-omit-frame-pointer -lpthread spmc2.c -o spmc2_arm
 all: $(PROGRAMS)
 prodcons0: prodcons0.c Makefile
 	gcc $(CCOPTS) -o example prodcons0.c $(LIBS)
@@ -15,7 +16,7 @@ prodcons3: prodcons3.c Makefile
 spmc: spmc.c Makefile
 	g++ $(CCOPTS) -o spmc spmc.c $(LIBS)
 spmc2: spmc2.c Makefile
-	g++ $(CCOPTS) -o spmc2 spmc2.c $(LIBS)	
+	$(CC) $(CCOPTS) -o spmc2 spmc2.c $(LIBS)	
 ordering: ordering.cpp
 	gcc -o ordering -O2 ordering.cpp -lpthread	
 clean:
