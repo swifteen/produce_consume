@@ -26,7 +26,7 @@
 
 #define BUFFER_SIZE (1024)
 #define MAGIC_NUMBER (0xAACC9527)
-#define CONSUMER_NUM (2)
+#define CONSUMER_NUM (10)
 #define DEBUG_MAX_SEQ_NO (10)
 
 static  FILE* g_simulate_fp = NULL;//真实读取到的模拟数据
@@ -93,7 +93,7 @@ int avilable_write_len()
 bool avilable_write()
 {
 	if((g_buffer.buf_used_count[g_buffer.write_idx] > 0)
-		|| (avilable_write_len() <= 0))
+		|| (avilable_write_len() <= 1))//这里判断可写入的长度大于1，是为了让读写指针在启动之后，永不相遇
 	{
 		return false;
 	}
@@ -125,7 +125,11 @@ void write_one_data()
 //获取可读取的长度
 int avilable_read_len(int read_idx)
 {
-    if(read_idx < g_buffer.write_idx)
+	if(read_idx == g_buffer.write_idx)
+	{
+		return 0;
+	}
+    else if(read_idx < g_buffer.write_idx)
     {
         return g_buffer.write_idx - read_idx - 1;
     }
@@ -142,7 +146,7 @@ int read_data(int consumerId,bool bFirst,MyData** data)
     pthread_mutex_lock(&g_buffer.lock);
     assert(0 <= g_buffer.read_idx[consumerId] && g_buffer.read_idx[consumerId] < g_buffer.size);
     // 等待缓冲区非空
-    while (avilable_read_len(g_buffer.read_idx[consumerId]) <= 0) {
+    while (avilable_read_len(g_buffer.read_idx[consumerId]) <= 1) {
         pthread_cond_wait(&g_buffer.empty, &g_buffer.lock);
     }
 	int read_idx = 0;
@@ -160,6 +164,7 @@ int read_data(int consumerId,bool bFirst,MyData** data)
 		{
 			read_idx = g_buffer.write_idx - 1;
 		}
+		g_buffer.read_idx[consumerId] = read_idx;
 	}
     g_buffer.buf_used_count[read_idx]++;//将使用计数加加
     assert(g_buffer.buf_used_count[read_idx] <= CONSUMER_NUM);
